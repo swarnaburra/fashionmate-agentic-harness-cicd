@@ -125,3 +125,9 @@ Rules: one induced fault and one fix per cycle; fix the right layer
 - The first dev run passed all 14 deterministic checks while the rubric scored 0/5. Structural checks alone cannot see grounding or task adherence.
 
 **Regression check (development tasks):** the default development task was rerun after every fix (runs RUN-20261105-020424, -024607, -052236, RUN-20261107-002930, -014242, -060001) and again after the final fix (REGRESSION-default.json); each scored 14/14 deterministic checks, so no fix broke a previously passing check. The rubric was not re-scored on development tasks after calibration.
+
+## Advisory review calibration
+
+| Date | PR | Findings | False positives | Rate | Notes |
+|---|---|---|---|---|---|
+| 2026-11-11 | #1 | 7 | 2 | 29% | Claimed OpenRouter /api/v1/messages unsupported and model anthropic/claude-sonnet-4.6 invalid; both disproved because this review was produced through that endpoint and model. Stays advisory (promotion threshold: under 10% false positives across 20 PRs). |
