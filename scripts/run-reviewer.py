@@ -156,7 +156,7 @@ def call_anthropic(prompt: str) -> str:
     text_parts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
     return "\n".join(text_parts).strip() or "No review text was returned."
 
- def main() -> int:
+def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     changed_files = read_changed_files()
