@@ -1,6 +1,6 @@
 # CI Agentic Step Design: FashionMate harness
 
-Author: swarna. Last updated: 2026-11-10.
+Author: swarna. Last updated: 2026-11-11.
 Pipeline: `.github/workflows/ci.yml` (GitHub Actions, `ubuntu-latest` runners, course container built from the repo at the tested commit).
 
 Rule used for every classification: deterministic checks may gate immediately; every new agentic (model-judged) step starts advisory and is promoted to gating only after its false-alarm rate has been measured over many runs.
@@ -15,7 +15,7 @@ Rule used for every classification: deterministic checks may gate immediately; e
 | advisory-review | Advisory Code Review | pull requests only | yes | no (`continue-on-error: true`) | `review-output.md`, review audit log |
 | audit-trail | Audit Trail | always, after the others | no | no | combined audit-trail artifact |
 
-Gaps found: no evaluation-harness job exists, so agent-affecting changes (prompts, agents, skills, allow-lists, `eval/`) are never re-checked against the Module 3 harness; and the review step reads `ANTHROPIC_API_KEY` while this course provisions `OPENROUTER_API_KEY`.
+Gaps found (resolved 2026-11-11): no evaluation-harness job existed, so agent-affecting changes were never re-checked; added as `eval-gate`. The review step read `ANTHROPIC_API_KEY`; migrated to `OPENROUTER_API_KEY` via OpenRouter's Anthropic-compatible endpoint.
 
 MCP server credentials: none required. The coursetools, retrieval and storage FastMCP servers read only non-secret configuration from the environment: file paths (COURSETOOLS_ROOT, COURSETOOLS_ALLOWLIST, *_AUDIT_LOG, STORAGE_STORE) and the role label AGENT_ROLE. None are credentials, so none are registered as secrets (checked 2026-11-10). Only OPENROUTER_API_KEY is registered.
 
@@ -28,7 +28,7 @@ A job only blocks a merge if it is a required status check in branch protection 
 | Policy Test Suite | yes | failure blocks merge |
 | Governed File Check | yes | failure blocks merge |
 | Evaluation Harness (deterministic) | yes | failure blocks merge; reports success when skipped for non-agent changes |
-| Evaluation Harness (rubric) | no | advisory |
+| Evaluation Harness (rubric) | no (step inside the required job, with step-level `continue-on-error: true`) | advisory: a rubric failure never fails the job |
 | Advisory Code Review | no | advisory (`continue-on-error: true`) |
 | Audit Trail | no | observational |
 
@@ -45,12 +45,13 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 
 ## Step: Evaluation harness (deterministic layer)
 
-- Does: Runs `eval/test_deterministic.py` (14 structural checks: tool grants, forbidden operations, role order, context bleed, reviewer conflict, similarity floor, output schema, budgets) against the committed holdout transcripts in `.eval-artifacts/runs/holdout/`.
-- Input: whole repository plus the classifier's "agent-affecting change" flag (runs only when `.claude/agents/`, `agents/`, `skills/`, `mcp/`, `mcp-servers/`, `eval/`, or `CLAUDE.md` change).
+- Does: Runs three deterministic pytest files: `test_deterministic.py` (3 repo smoke tests: handoff-validator CLI, least-privilege wording in the policy, required directories), `test_deterministic_router.py` (5 routing tests), and `test_deterministic_step.py` (7 handoff-schema tests, including 3 holdout handoff cases). 15 tests, no model call.
+- Input: whole repository; runs only when the Change Classifier flags an agent-affecting change (`.github/workflows/`, `.agents/`, `.skills/`, `.claude/agents/`, `agents/`, `skills/`, `mcp/`, `mcp-servers/`, `eval/`, `CLAUDE.md`, governance docs, `scripts/run-agent.sh`). Workflow files are included because editing a gate must re-run that gate.
 - Produces: `deterministic-report.json` artifact.
-- Classification: **gating, conditional.** Deterministic, and it already catches the six calibrated failure modes. Known gap recorded in `docs/calibration-log.md` (HO-05 latency, HO-07 crash) is excluded from the gate until fixed rather than silently ignored. While excluded, both tasks still run and their results appear in `deterministic-report.json` and the audit trail, so a regression stays visible. The exclusion is removed once both pass on three consecutive runs.
+- Classification: **gating, conditional.** Deterministic: same inputs, same result. Verified on PR #1 (ran in 6m 36s on an `eval/` change) and on commit 6e18ae6 (skipped on a `ci.yml`-only change, before workflow files were added to the trigger list).
 - Time limit: 10 minutes.
-- Credentials: none (reads saved transcripts; makes no model call).
+- Credentials: none.
+- Known gap: the 14 transcript-level checks from Module 3 (context_bleed, role_order, similarity_floor, forbidden_operations, etc.) are scored when transcripts are produced, not re-scored in CI. The 62 committed files in `.eval-artifacts/` could be re-checked here; that is a follow-up. HO-05 (latency) and HO-07 (crash) remain open in `docs/calibration-log.md`.
 
 ## Step: Evaluation harness (rubric layer)
 
@@ -66,9 +67,9 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 - Does: The reviewer subagent reads the changed files, scores them against the quality rubric, and posts a structured review comment on the pull request.
 - Input: changed files from the Change Classifier.
 - Produces: a PR comment, `review-output.md`, and `review-audit.json`.
-- Classification: **advisory** (`continue-on-error: true`; not a required status check). Its output needs human judgment and its false-positive rate is unmeasured. Promote to gating only after a human reviewer has labelled its findings on at least 20 PRs and fewer than 10% are false alarms. Results are tracked in `docs/calibration-log.md`.
+- Classification: **advisory** (`continue-on-error: true`; not a required status check). Its output needs human judgment. First measured false-positive rate: 2 of 7 findings (29%) on PR #1, see `docs/calibration-log.md`. Promote to gating only after a human reviewer has labelled its findings on at least 20 PRs and fewer than 10% are false alarms. Results are tracked in `docs/calibration-log.md`.
 - Time limit: 15 minutes.
-- Credentials: `OPENROUTER_API_KEY`, scoped to the reviewer step only; the review script must be migrated from `ANTHROPIC_API_KEY`.
+- Credentials: `OPENROUTER_API_KEY`, scoped to the reviewer step only. Migrated from `ANTHROPIC_API_KEY` to OpenRouter's Anthropic-compatible endpoint on 2026-11-11; verified by a real review on PR #1.
 
 ## Step: Audit trail
 
@@ -83,4 +84,4 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 
 - **Dependency auditor in CI:** not added. Its role is advisory by design and it has no output a PR author can act on yet. Revisit once it can write a findings artifact.
 - **Rubric suite as a gate:** not added as a gate. It scored 38/80 on holdout; it stays advisory until it calibrates (see rubric step above).
-- **Live-agent runs on every push:** not added. Too slow and costly for a check that must finish in under 10 minutes; saved holdout transcripts are used instead.
+- **Live-agent runs on every push:** not added. Too slow and costly for a check that must finish in under 10 minutes; the gate runs deterministic tests instead, and re-scoring the committed holdout transcripts is a listed follow-up.
