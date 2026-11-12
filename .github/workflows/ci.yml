@@ -33,7 +33,7 @@ jobs:
           echo "changed-files=$CHANGED_ONELINE" >> "$GITHUB_OUTPUT"
 
           # Files that affect agent behavior, tool contracts, evals, or governance.
-          if echo "$CHANGED" | grep -qE '^(\.agents/|\.skills/|\.claude/agents/|agents/|skills/|mcp/|mcp-servers/|eval/|CLAUDE\.md|docs/governance-policy\.md|docs/routing-and-tool-grant-map\.md|scripts/run-agent\.sh)'; then
+          if echo "$CHANGED" | grep -qE '^(\.github/workflows/|\.agents/|\.skills/|\.claude/agents/|agents/|skills/|mcp/|mcp-servers/|eval/|CLAUDE\.md|docs/governance-policy\.md|docs/routing-and-tool-grant-map\.md|scripts/run-agent\.sh)'; then
             echo "requires-governed-check=true" >> "$GITHUB_OUTPUT"
           else
             echo "requires-governed-check=false" >> "$GITHUB_OUTPUT"
@@ -173,7 +173,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/ci-artifacts":/reports \
             -w /workspace \
             agentic_engineer_4 \
-            python -m pytest eval/test_deterministic.py -v -p no:cacheprovider \
+            python -m pytest eval/test_deterministic.py eval/test_deterministic_router.py eval/test_deterministic_step.py -v -p no:cacheprovider \
               --json-report \
               --json-report-file=/reports/deterministic-report.json
 
