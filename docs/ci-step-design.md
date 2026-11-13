@@ -45,8 +45,8 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 
 ## Step: Evaluation harness (deterministic layer)
 
-- Does: Runs three deterministic pytest files: `test_deterministic.py` (3 repo smoke tests: handoff-validator CLI, least-privilege wording in the policy, required directories), `test_deterministic_router.py` (5 routing tests), and `test_deterministic_step.py` (7 handoff-schema tests, including 3 holdout handoff cases). 15 tests, no model call.
-- Input: whole repository; runs only when the Change Classifier flags an agent-affecting change (`.github/workflows/`, `.agents/`, `.skills/`, `.claude/agents/`, `agents/`, `skills/`, `mcp/`, `mcp-servers/`, `eval/`, `CLAUDE.md`, governance docs, `scripts/run-agent.sh`). Workflow files are included because editing a gate must re-run that gate.
+- Does: Runs three deterministic pytest files: `test_deterministic.py` (3 repo smoke tests: handoff-validator CLI, least-privilege wording in the policy, required directories), `test_deterministic_router.py` (5 routing tests), and `test_deterministic_step.py` (7 handoff-schema tests, including 3 holdout handoff cases). 15 tests, plus `test_audit_trail.py` (4 tests: trail sections present, denials collected, secrets redacted, skipped eval recorded as not_triggered) so a broken audit-trail script blocks the merge. 19 tests, no model call.
+- Input: whole repository; runs only when the Change Classifier flags an agent-affecting change (`.github/workflows/`, `.agents/`, `.skills/`, `.claude/agents/`, `agents/`, `skills/`, `mcp/`, `mcp-servers/`, `eval/`, `CLAUDE.md`, governance docs, `scripts/`). Workflow files are included because editing a gate must re-run that gate.
 - Produces: `deterministic-report.json` artifact.
 - Classification: **gating, conditional.** Deterministic: same inputs, same result. Verified on PR #1 (ran in 6m 36s on an `eval/` change) and on commit 6e18ae6 (skipped on a `ci.yml`-only change, before workflow files were added to the trigger list).
 - Time limit: 10 minutes.
@@ -66,7 +66,7 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 
 - Does: The reviewer subagent reads the changed files, scores them against the quality rubric, and posts a structured review comment on the pull request.
 - Input: changed files from the Change Classifier.
-- Produces: a PR comment, `review-output.md`, and `review-audit.json`.
+- Produces: a PR comment, `review-output.md`, and `review-audit.json`. The comment is created or updated by a hidden marker (`scripts/upsert_pr_comment.py`), so reruns update one comment and the review and audit summary never overwrite each other.
 - Classification: **advisory** (`continue-on-error: true`; not a required status check). Its output needs human judgment. First measured false-positive rate: 2 of 7 findings (29%) on PR #1, see `docs/calibration-log.md`. Promote to gating only after a human reviewer has labelled its findings on at least 20 PRs and fewer than 10% are false alarms. Results are tracked in `docs/calibration-log.md`.
 - Time limit: 15 minutes.
 - Credentials: `OPENROUTER_API_KEY`, scoped to the reviewer step only. Migrated from `ANTHROPIC_API_KEY` to OpenRouter's Anthropic-compatible endpoint on 2026-11-11; verified by a real review on PR #1.
@@ -76,12 +76,14 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 
 ## Step: Audit trail
 
-- Does: Combines the policy, governed-file, evaluation, and review artifacts into one JSON trail and posts a PR summary.
-- Input: artifacts from all earlier jobs, including failed ones.
-- Produces: `ci-audit-trail-[sha].json` artifact (90-day retention) and a PR comment.
-- Classification: **observational; always runs** (`if: always()`), never blocks.
+- Does: Runs after every other job (`needs:` lists all five, `if: always()`), downloads every artifact (`download-artifact@v4` with `merge-multiple: true`), and `scripts/build-audit-trail.py` combines them into one record: CI metadata (SHA, event, PR, timestamp), change classification (including `touches_policy`), every gate result, per-check policy results, per-check deterministic results, rubric results and any recorded scores, and MCP activity with any authorization denials.
+- Input: job results passed as arguments, plus the uploaded reports and any MCP audit logs. In CI the jobs make no MCP calls, so the trail says "No MCP audit logs in this run" instead of showing an unexplained empty list. Denials are collected whenever MCP audit logs are present (covered by `test_audit_trail.py`).
+- Produces: `ci-audit-trail-<sha>.json` and `ci-audit-summary.md` in the `audit-trail` artifact (90-day retention), plus a PR summary comment updated in place by a hidden marker.
+- Honest gate reporting: a conditional gate whose heavy steps were skipped is recorded as `not_triggered`, not `success`.
+- Secrets: the script never reads the environment, and every string it writes passes through a redaction filter for token-shaped values (`sk-or-`, `sk-ant-`, GitHub tokens, Bearer values). Verified by a test and by scanning a downloaded trail.
+- Classification: **observational; always runs** (`if: always()`), never blocks. The script itself is tested by the deterministic gate, so a change that would break the record blocks the merge.
 - Time limit: 5 minutes.
-- Credentials: GitHub token with pull-request comment permission only.
+- Credentials: none. Job-level `contents: read` and `pull-requests: write` for the automatic token only.
 
 ## Considered and not added
 

@@ -38,7 +38,7 @@ jobs:
           echo "changed-files=$CHANGED_ONELINE" >> "$GITHUB_OUTPUT"
 
           # Files that affect agent behavior, tool contracts, evals, or governance.
-          if [ -z "$CHANGED" ] || echo "$CHANGED" | grep -qE '^(\.github/workflows/|\.agents/|\.skills/|\.claude/agents/|agents/|skills/|mcp/|mcp-servers/|eval/|CLAUDE\.md|docs/governance-policy\.md|docs/routing-and-tool-grant-map\.md|scripts/run-agent\.sh)'; then
+          if [ -z "$CHANGED" ] || echo "$CHANGED" | grep -qE '^(\.github/workflows/|\.agents/|\.skills/|\.claude/agents/|agents/|skills/|mcp/|mcp-servers/|eval/|CLAUDE\.md|docs/governance-policy\.md|docs/routing-and-tool-grant-map\.md|scripts/)'; then
             echo "requires-governed-check=true" >> "$GITHUB_OUTPUT"
           else
             echo "requires-governed-check=false" >> "$GITHUB_OUTPUT"
@@ -169,7 +169,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f ci-out/review-output.md ]; then
-            gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --repo ${{ github.repository }} --body-file ci-out/review-output.md
+            python3 scripts/upsert_pr_comment.py "${{ github.event.pull_request.number }}" "<!-- ci:advisory-review -->" ci-out/review-output.md
           fi
 
       - name: Upload advisory review artifact
@@ -213,7 +213,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/ci-artifacts":/reports \
             -w /workspace \
             agentic_engineer_4 \
-            python -m pytest eval/test_deterministic.py eval/test_deterministic_router.py eval/test_deterministic_step.py -v -p no:cacheprovider \
+            python -m pytest eval/test_deterministic.py eval/test_deterministic_router.py eval/test_deterministic_step.py eval/test_audit_trail.py -v -p no:cacheprovider \
               --json-report \
               --json-report-file=/reports/deterministic-report.json
 
@@ -249,6 +249,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [change-type-check, policy-gate, governed-file-gate, eval-gate, advisory-review]
     if: always()
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -276,12 +279,21 @@ jobs:
             --policy-result "${{ needs.policy-gate.result }}" \
             --governed-result "${{ needs.governed-file-gate.result }}" \
             --review-result "${{ needs.advisory-review.result }}" \
+            --eval-result "${{ needs.eval-gate.result }}" \
             --artifacts ci-artifacts
 
       - name: Upload audit trail
         uses: actions/upload-artifact@v4
         with:
           name: audit-trail
-          path: ci-audit-trail-*.json
+          path: |
+            ci-audit-trail-*.json
+            ci-audit-summary.md
           retention-days: 90
           if-no-files-found: error
+
+      - name: Post audit summary
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/upsert_pr_comment.py "${{ github.event.pull_request.number }}" "<!-- ci:audit-summary -->" ci-audit-summary.md
