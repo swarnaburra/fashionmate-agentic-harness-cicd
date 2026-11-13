@@ -131,3 +131,6 @@ Rules: one induced fault and one fix per cycle; fix the right layer
 | Date | PR | Findings | False positives | Rate | Notes |
 |---|---|---|---|---|---|
 | 2026-11-11 | #1 | 7 | 2 | 29% | Claimed OpenRouter /api/v1/messages unsupported and model anthropic/claude-sonnet-4.6 invalid; both disproved because this review was produced through that endpoint and model. Stays advisory (promotion threshold: under 10% false positives across 20 PRs). |
+## CI infrastructure flakes
+
+- 2026-11-11: run #27 (acaea2d, main) Governed File Check failed with 'No space left on device' on the GitHub runner. Infrastructure flake, not a gate failure; re-ran the failed job and did not bypass the gate. Fix: 'Free disk space' step before each container build (PR on branch ci/free-disk-space).
