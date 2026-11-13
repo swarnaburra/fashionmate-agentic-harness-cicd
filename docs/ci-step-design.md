@@ -70,6 +70,9 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 - Classification: **advisory** (`continue-on-error: true`; not a required status check). Its output needs human judgment. First measured false-positive rate: 2 of 7 findings (29%) on PR #1, see `docs/calibration-log.md`. Promote to gating only after a human reviewer has labelled its findings on at least 20 PRs and fewer than 10% are false alarms. Results are tracked in `docs/calibration-log.md`.
 - Time limit: 15 minutes.
 - Credentials: `OPENROUTER_API_KEY`, scoped to the reviewer step only. Migrated from `ANTHROPIC_API_KEY` to OpenRouter's Anthropic-compatible endpoint on 2026-11-11; verified by a real review on PR #1.
+- Permissions: job-level `contents: read` and `pull-requests: write` only, so the automatic token can post the review comment and nothing else.
+- Audit record: this reviewer calls the model directly and makes no MCP calls, so there is no MCP audit log to collect. `review-audit.json` (files reviewed, why each was included or skipped, key present true/false, never the value) is its audit record and is uploaded in the `advisory-review` artifact.
+- Two advisory layers seen in practice: on PR #1 an indentation error made the script exit non-zero; job-level `continue-on-error: true` contained it and nothing was blocked. After the fix, the script exited 0 while reporting high-priority findings.
 
 ## Step: Audit trail
 

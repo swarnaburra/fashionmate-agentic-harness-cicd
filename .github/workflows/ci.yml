@@ -127,6 +127,9 @@ jobs:
     needs: [change-type-check, policy-gate]
     if: github.event_name == 'pull_request'
     continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -153,6 +156,15 @@ jobs:
             python scripts/run-reviewer.py
 
           cp -r ci-out/. ci-artifacts/ 2>/dev/null || true
+
+      - name: Post review comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f ci-out/review-output.md ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body-file ci-out/review-output.md
+          fi
 
       - name: Upload advisory review artifact
         if: always()
