@@ -71,6 +71,8 @@ def summarize_report(report, include_scores: bool = False) -> dict:
     checks = []
     for test in report.get("tests", []):
         entry = {"check": test.get("nodeid"), "outcome": test.get("outcome")}
+        if test.get("detail"):
+            entry["detail"] = test["detail"]
         if include_scores:
             scores = _user_properties(test)
             if scores:
@@ -147,7 +149,11 @@ def build_summary(trail: dict) -> str:
     policy = trail["policy"]
     det = trail["harness"]["deterministic"]
     rubric = trail["harness"]["rubric"]
+    integrity = trail["pipeline_integrity"]
     mcp = trail["mcp_activity"]
+    failed_integrity = [
+        c["check"].split("::")[-1] for c in integrity["checks"] if c["outcome"] != "passed"
+    ]
 
     lines = [
         "## CI audit summary",
@@ -159,9 +165,16 @@ def build_summary(trail: dict) -> str:
         f"| Policy Test Suite | {results['policy_gate']} |",
         f"| Governed File Check | {results['governed_file_gate']} |",
         f"| Evaluation Harness | {results['eval_gate']} |",
+        f"| Pipeline Integrity Check | {results['pipeline_integrity']} |",
         f"| Advisory Code Review | {results['advisory_review']} (advisory) |",
         "",
         f"- Policy checks: {policy['passed']}/{policy['total']} passed",
+        (
+            f"- Pipeline integrity checks: {integrity['passed']}/{integrity['total']} passed"
+            + (f" (failed: {', '.join(failed_integrity)})" if failed_integrity else "")
+            if integrity["present"]
+            else "- Pipeline integrity checks: not run"
+        ),
         (
             f"- Deterministic harness: {det['passed']}/{det['total']} passed"
             if det["present"]
@@ -195,6 +208,7 @@ def main() -> int:
     parser.add_argument("--policy-result", default="unknown")
     parser.add_argument("--governed-result", default="unknown")
     parser.add_argument("--eval-result", default="unknown")
+    parser.add_argument("--integrity-result", default="unknown")
     parser.add_argument("--review-result", default="unknown")
     parser.add_argument("--artifacts", default="ci-artifacts")
     parser.add_argument("--out-dir", default=".")
@@ -222,8 +236,13 @@ def main() -> int:
             "policy_gate": args.policy_result,
             "governed_file_gate": gate_status(args.governed_result, triggered),
             "eval_gate": gate_status(args.eval_result, triggered),
+            # Always runs, so it is never "not_triggered"; a missing report shows as "not run".
+            "pipeline_integrity": args.integrity_result,
             "advisory_review": args.review_result,
         },
+        "pipeline_integrity": summarize_report(
+            load_json(artifact_dir / "pipeline-integrity-report.json", {})
+        ),
         "policy": summarize_report(load_json(artifact_dir / "policy-report.json", {})),
         "governed_files": summarize_report(
             load_json(artifact_dir / "governed-file-report.json", {})
