@@ -131,6 +131,7 @@ Rules: one induced fault and one fix per cycle; fix the right layer
 | Date | PR | Findings | False positives | Rate | Notes |
 |---|---|---|---|---|---|
 | 2026-11-11 | #1 | 7 | 2 | 29% | Claimed OpenRouter /api/v1/messages unsupported and model anthropic/claude-sonnet-4.6 invalid; both disproved because this review was produced through that endpoint and model. Stays advisory (promotion threshold: under 10% false positives across 20 PRs). |
+| 2026-11-12 | #4 | 8 | 3 | 38% | False positives: governed check skipped while touches-policy is true (impossible: touches-policy paths are a subset of governed paths); unpinned audit-trail dependencies (script imports only the standard library); Docker tag race (each job has its own runner). Valid and fixed in the follow-up PR: `${{ }}` changed-files interpolated into run blocks (now passed via env), HEAD~1 push diff (now github.event.before, and runs all gates if no changes can be detected), duplicate comments on reruns (now --edit-last). Low value: key inside the container (already step-scoped, never printed); review not waiting for gates (advisory by design). Cumulative: 5 of 15 (33%). Stays advisory. |
 ## CI infrastructure flakes
 
 - 2026-11-11: run #27 (acaea2d, main) Governed File Check failed with 'No space left on device' on the GitHub runner. Infrastructure flake, not a gate failure; re-ran the failed job and did not bypass the gate. Fix: 'Free disk space' step before each container build (PR on branch ci/free-disk-space).

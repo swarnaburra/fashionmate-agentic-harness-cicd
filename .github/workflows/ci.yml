@@ -26,14 +26,19 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             CHANGED=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}")
           else
-            CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+            BEFORE="${{ github.event.before }}"
+            if [ -n "$BEFORE" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+              CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}")
+            else
+              CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+            fi
           fi
 
           CHANGED_ONELINE=$(echo "$CHANGED" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
           echo "changed-files=$CHANGED_ONELINE" >> "$GITHUB_OUTPUT"
 
           # Files that affect agent behavior, tool contracts, evals, or governance.
-          if echo "$CHANGED" | grep -qE '^(\.github/workflows/|\.agents/|\.skills/|\.claude/agents/|agents/|skills/|mcp/|mcp-servers/|eval/|CLAUDE\.md|docs/governance-policy\.md|docs/routing-and-tool-grant-map\.md|scripts/run-agent\.sh)'; then
+          if [ -z "$CHANGED" ] || echo "$CHANGED" | grep -qE '^(\.github/workflows/|\.agents/|\.skills/|\.claude/agents/|agents/|skills/|mcp/|mcp-servers/|eval/|CLAUDE\.md|docs/governance-policy\.md|docs/routing-and-tool-grant-map\.md|scripts/run-agent\.sh)'; then
             echo "requires-governed-check=true" >> "$GITHUB_OUTPUT"
           else
             echo "requires-governed-check=false" >> "$GITHUB_OUTPUT"
@@ -144,6 +149,7 @@ jobs:
       - name: Run advisory agentic review
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CHANGED_FILES: ${{ needs.change-type-check.outputs.changed-files }}
         run: |
           mkdir -p ci-out ci-artifacts
           docker run --rm \
@@ -151,7 +157,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/ci-out":/out \
             -w /workspace \
             -e OPENROUTER_API_KEY \
-            -e CHANGED_FILES="${{ needs.change-type-check.outputs.changed-files }}" \
+            -e CHANGED_FILES \
             agentic_engineer_4 \
             python scripts/run-reviewer.py
 
@@ -163,7 +169,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f ci-out/review-output.md ]; then
-            gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body-file ci-out/review-output.md
+            gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --repo ${{ github.repository }} --body-file ci-out/review-output.md
           fi
 
       - name: Upload advisory review artifact
@@ -257,12 +263,14 @@ jobs:
           merge-multiple: true
 
       - name: Build audit trail
+        env:
+          CHANGED_FILES: ${{ needs.change-type-check.outputs.changed-files }}
         run: |
           python3 scripts/build-audit-trail.py \
             --sha "${{ github.sha }}" \
             --event "${{ github.event_name }}" \
             --pr "${{ github.event.pull_request.number || 0 }}" \
-            --changed-files "${{ needs.change-type-check.outputs.changed-files }}" \
+            --changed-files "$CHANGED_FILES" \
             --touches-policy "${{ needs.change-type-check.outputs.touches-policy }}" \
             --requires-governed-check "${{ needs.change-type-check.outputs.requires-governed-check }}" \
             --policy-result "${{ needs.policy-gate.result }}" \
