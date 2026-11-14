@@ -3,7 +3,7 @@
 Author: swarna. Date: 2026-11-14.
 Source of the step list: `docs/orchestration-diagram.md` (walked from the parent outward), `eval/orchestrator.py`, `.claude/agents/`, and the CI pipeline in `.github/workflows/ci.yml`.
 
-**Method.** Every step is tested against the four signals: stability, repeatability, specifiability, high run rate. Evidence comes from the Module 3 calibration log (`docs/calibration-log.md`), the Module 4 calibration log, and a read-only analysis of the 31 committed run transcripts in `.eval-artifacts/runs/` (`scripts/analyze_citations.py`, no model calls). Those transcripts were produced by `eval/orchestrator.py` inside the course container during calibration, so the behavior measured is the behavior that would be converted.
+**Method.** Every step is tested against the four signals: stability, repeatability, specifiability, high run rate. Evidence comes from the Module 3 calibration log (`docs/calibration-log.md`), the Module 4 calibration log, and a read-only analysis of the committed run transcripts (30 with role outputs) in `.eval-artifacts/runs/` (`scripts/analyze_citations.py`, no model calls). Those transcripts were produced by `eval/orchestrator.py` inside the course container during calibration, so the behavior measured is the behavior that would be converted.
 
 **Summary.** 15 steps listed: 9 agentic, 6 already deterministic. **1 strong candidate** (citation list assembly), 2 weak candidates (tester, project manager), 6 not candidates.
 
@@ -32,21 +32,27 @@ Source of the step list: `docs/orchestration-diagram.md` (walked from the parent
 What it does today: every role is told in `_FINALIZE_INSTRUCTIONS` (eval/orchestrator.py, line 385): *"For roles using retrieve, list the source_document names in citation_list."* The model writes the list itself.
 
 - **Stability:** the task definition has not changed since the Module 3 schema fix (2e31057), and its failure modes are now fully catalogued. The harness's `output_schema` check passed on every development run after 2e31057 (six reruns, 14/14 each, plus REGRESSION-default) and on all 6 measured holdout tasks, across two calibration cycles (2026-11-05 baseline, 2026-11-07 calibration). Note: that check confirms the field *exists*, not that its contents are *correct*; correctness was measured separately below.
-- **Repeatability:** measured on the default development task, the same input run 7 times during calibration (RUN-20261105-020424, -024607, -052236, RUN-20261107-002930, -014242, -060001, REGRESSION-default):
-  - planner (the one role that calls `retrieve`): **1 distinct list in 7 runs**, identical to the rule every time;
-  - implementer: **4 distinct lists in 7 runs**; tester: **5 in 7**; reviewer: **2 in 6**. These roles never call `retrieve`, so the correct list is fixed, yet the agent alternated between `[]`, copying the planner's documents, storage entry IDs, and paraphrased titles;
-  - the deterministic rule produces **1 list per role, every run**.
-  Across all 31 transcripts (122 role outputs), the agent matched the rule exactly in **84 (68%)**. The rest: 32 omitted or added inherited documents inconsistently, 13 had the same documents in a different order, 9 cited storage entry IDs instead of documents, 5 used paraphrased or invented document names (e.g. "Incident Report" for `incident-report-2024-q3.md`), and 4 had no `citation_list` at all.
-  Conclusion: the *correct output* is fully repeatable from the input; the *agent* reproduces it only when there is a real lookup to do. The variation is spec violation, not useful judgment.
-- **Specifiability:** one-paragraph spec, written so a developer could implement it without questions: *For each role's output, `citation_list` is the list of `source_document` values from that role's own `retrieve` tool results in the current run, deduplicated, in order of first appearance. If the role made no `retrieve` calls, it is `[]`. Results withheld by the classification ceiling are never returned by `retrieve`, so they cannot appear. The model no longer writes this field; the orchestrator sets it after the role finishes, overwriting anything the model produced.*
+- **Repeatability:** the deterministic rule (Rule A, below) is a pure function of the role's own `retrieve` results in the transcript: the same tool calls always give the same list. The agent's list did not consistently follow its own tool calls. Measured on the default development task, the same input run 7 times during calibration (RUN-20261105-020424, -024607, -052236, RUN-20261107-002930, -014242, -060001, REGRESSION-default):
+
+  | Role | Runs | Distinct lists the agent wrote | Distinct lists its own retrievals justify (Rule A) |
+  |---|---|---|---|
+  | planner | 7 | 1 | 1 |
+  | implementer | 7 | 4 | 2 |
+  | reviewer | 6 | 2 | 2 |
+  | tester | 7 | 5 | 1 |
+
+  The planner (which always retrieves) matched the rule every time. The implementer and tester varied more than their own tool calls justify: the tester retrieved nothing in all 7 runs (Rule A gives `[]` every time) yet wrote 5 different lists.
+  Across all 30 transcripts with role outputs (122 outputs), the agent matched Rule A exactly in **84 (68.9%)**. The other 38: 12 (9.8%) same documents in a different order; 9 (7.4%) cited storage entry IDs instead of documents; 8 (6.6%) cited real documents although the role made no `retrieve` call; 5 (4.1%) used paraphrased or invented names (e.g. "Incident Report" for `incident-report-2024-q3.md`); 4 (3.3%) had no `citation_list` at all. For comparison, a rule that also inherits the previous role's citations (Rule B) matched only 59 (48.4%), so "carrying citations forward" is not what the agent consistently did.
+  Conclusion: the *correct output* is fully repeatable from the transcript; the *agent* reproduces it reliably only when it has a real lookup to do. The variation is a spec violation, not useful judgment.
+- **Specifiability:** one-paragraph spec (Rule A), written so a developer could implement it without questions: *For each role's output, `citation_list` is the list of `source_document` values from that role's own `retrieve` tool results in the current run, deduplicated, in order of first appearance. If the role made no `retrieve` calls, it is `[]`. Results withheld by the classification ceiling are never returned by `retrieve`, so they cannot appear. The model no longer writes this field; the orchestrator sets it after the role finishes, overwriting anything the model produced.*
 - **Run rate:** runs on every role output in every orchestrator run: 4 per standard run, 5 on the five-role path, and on every holdout and regression run. Many times per day during development and every CI evaluation.
-- **Known agent judgment / edge-case input the deterministic version must preserve:** a role that did **not** call `retrieve` but built on documents passed down in its handoff (implementer, tester, reviewer). The agent *sometimes* carried the planner's citations forward, which looks like provenance-tracking judgment, but it did so inconsistently (the "own + inherited" rule matched only 48%). The deterministic version must make this explicit rather than lose it silently: `citation_list` = own retrievals only (matching the written spec), and upstream provenance stays available through the scoped handoff chain. A second edge case: a role that read **storage entries** (`read_entry`) and cited their IDs. Storage entries are not documents, so the deterministic version does not list them; this is a deliberate change from the agent's occasional behavior and is recorded in the ADR.
+- **Known agent judgment / edge-case input the deterministic version must preserve:** a role that did **not** call `retrieve` but built on documents passed down in its handoff (implementer, tester, reviewer). The agent *sometimes* carried the planner's citations forward (8 outputs cited real documents with no `retrieve` call), which looks like provenance-tracking judgment, but it did so inconsistently (the "own + inherited" Rule B matched only 48.4%). The deterministic version must make this explicit rather than lose it silently: `citation_list` = own retrievals only (matching the written spec), and upstream provenance stays available through the scoped handoff chain. A second edge case: a role that read **storage entries** (`read_entry`) and cited their IDs. Storage entries are not documents, so the deterministic version does not list them; this is a deliberate change from the agent's occasional behavior and is recorded in the ADR.
 - **Recommendation: strong candidate.** All four signals are met, the correct output is a lookup over data the orchestrator already holds, and converting it removes one of the six Module 3 failure modes (schema validation) by design instead of by prompt wording.
 
 ## Step: Tester (run tests, report pass/fail)
 
 - **Stability:** behavior well understood in the four-role path; passed `required_roles` and `role_order` on every run after 45ccef5.
-- **Repeatability:** not yet measurable for its core output. In the harness the tester does not run a real test suite, so there is no pass/fail result to compare across runs; its citation output varied (5 distinct lists in 7 runs).
+- **Repeatability:** not yet measurable for its core output. In the harness the tester does not run a real test suite, so there is no pass/fail result to compare across runs; its citation output varied (5 distinct lists in 7 runs where its own retrievals justify 1).
 - **Specifiability:** yes in principle: run pytest on the changed files, report exit code and pass/fail counts.
 - **Run rate:** every standard run.
 - **Edge case to preserve:** pytest exit code 5 ("no tests collected"). An agent can report "no tests apply to this change"; a naive script would treat it as a failure or a pass.
@@ -115,4 +121,6 @@ Orchestrator sequencing, file-path routing, scoped handoff construction, handoff
 python scripts/analyze_citations.py .
 ```
 
-Reads only the committed transcripts; prints the match rates, the difference categories, and the repeatability counts above.
+Reads only the committed transcripts; prints the match rates, the difference categories, and the repeatability counts above. Every figure is measured against Rule A unless labelled Rule B, and the script exits non-zero if it finds no transcripts.
+
+**Evidence correction (2026-11-14).** The first version of this analysis mixed Rule A and Rule B in its difference categories and claimed the implementer and reviewer "never call retrieve". The advisory code review on the classification PR flagged the inconsistency; the script was fixed to measure everything against Rule A, and the figures above are the corrected ones. The recommendation did not change.

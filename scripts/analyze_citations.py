@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Refined evidence for the citation_list step (read-only, no model calls).
+Evidence for the citation_list step (read-only, no model calls).
 
-Compares each agent-written citation_list against two candidate rules:
-  Rule A: unique source_document values from the role's OWN retrieve results.
-  Rule B: Rule A, then the citations inherited from the previous role's
-          (rule-derived) list, deduplicated, order of first appearance.
-and classifies every difference from Rule B.
+The proposed deterministic spec is Rule A:
+  citation_list = unique source_document values from the role's OWN retrieve
+  results in this run, in order of first appearance; [] if it made no retrieve call.
 
-Also checks repeatability on the default development task (the same input run
-several times during calibration).
+Rule B (Rule A + citations inherited from the previous role) is reported only
+as a comparison, to test whether the agent was really "carrying citations forward".
 
-Usage: python analyze_citations_v2.py [repo_root]
+Every headline number, difference category and repeatability count below is
+measured against Rule A unless it is explicitly labelled Rule B.
+
+Usage: python analyze_citations.py [repo_root]
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ DEFAULT_TASK_RUNS = [
     "RUN-20261107-002930", "RUN-20261107-014242", "RUN-20261107-060001",
     "REGRESSION-default",
 ]
-UUIDISH = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-|entry:|decision-record|/ ", re.I)
+STORAGE_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-|entry:|decision-record|\s/\s", re.I)
 
 
 def unique(seq):
@@ -37,6 +38,10 @@ def unique(seq):
             seen.add(s)
             out.append(s)
     return out
+
+
+def pct(n, d):
+    return f"{100 * n / d:.1f}%" if d else "n/a"
 
 
 def retrieved(event):
@@ -49,92 +54,102 @@ def analyse(path: Path):
     data = json.loads(path.read_text(encoding="utf-8"))
     events = data.get("events") if isinstance(data, dict) else None
     if not isinstance(events, list):
-        return []
+        return [], set()
     own = defaultdict(list)
-    prev_rule_b: list[str] = []
+    registry = set()
+    prev_b: list[str] = []
     rows = []
     for event in events:
-        if not isinstance(event, dict):
-            continue
-        role = event.get("role")
+        if not isinstance(event, dict) or not event.get("role"):
+            continue  # malformed events never enter the comparison chain
+        role = event["role"]
         if event.get("type") == "tool_call" and event.get("tool") == "retrieve":
-            own[role].extend(retrieved(event))
+            docs = retrieved(event)
+            own[role].extend(docs)
+            registry.update(docs)
         elif event.get("type") == "subagent":
             doc = event.get("output_document") or {}
             cited = doc.get("citation_list") if isinstance(doc, dict) else None
             rule_a = unique(own[role])
-            rule_b = unique(rule_a + prev_rule_b)
+            rule_b = unique(rule_a + prev_b)
             rows.append((role, cited, rule_a, rule_b))
-            prev_rule_b = rule_b
-    return rows
+            prev_b = rule_b
+    return rows, registry
 
 
-def classify(cited, rule_b, known_docs):
+def classify(cited, rule_a, registry):
+    """One primary category per output, compared with Rule A, checked in this order."""
     if not isinstance(cited, list):
         return "missing citation_list"
-    if cited == rule_b:
+    if cited == rule_a:
         return "match"
-    if set(cited) == set(rule_b):
-        return "same docs, different order"
-    if any(UUIDISH.search(str(c)) for c in cited):
-        return "cites storage entries, not documents"
-    if any(c not in known_docs for c in cited):
+    if set(cited) == set(rule_a):
+        return "same documents, different order"
+    if any(STORAGE_ID.search(str(c)) for c in cited):
+        return "cites storage entries instead of documents"
+    if any(c not in registry for c in cited):
         return "paraphrased or invented document name"
-    if set(cited) < set(rule_b):
-        return "omits a retrieved/inherited document"
-    if set(cited) > set(rule_b):
-        return "cites a document it never received"
-    return "other"
+    if not rule_a and cited:
+        return "cites documents it did not retrieve (role made no retrieve call)"
+    if set(cited) < set(rule_a):
+        return "omits a document it retrieved"
+    if set(cited) > set(rule_a):
+        return "adds a real document it did not retrieve"
+    return "other mismatch"
 
 
 def main() -> int:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-    files = sorted((root / ".eval-artifacts" / "runs").rglob("*.json"))
-    all_rows = {}
-    known_docs = set()
+    runs_dir = root / ".eval-artifacts" / "runs"
+    files = sorted(runs_dir.rglob("*.json")) if runs_dir.is_dir() else []
+    if not files:
+        print(f"ERROR: no transcripts found under {runs_dir}; run from the repo root.")
+        return 1
+
+    all_rows, registry = {}, set()
     for path in files:
         try:
-            rows = analyse(path)
+            rows, reg = analyse(path)
         except Exception:
             continue
         if rows:
             all_rows[path.stem] = rows
-            for _, _, a, b in rows:
-                known_docs.update(a)
-                known_docs.update(b)
+            registry |= reg
 
     total = sum(len(r) for r in all_rows.values())
-    match_a = sum(1 for rows in all_rows.values() for _, c, a, _ in rows if c == a)
-    match_b = sum(1 for rows in all_rows.values() for _, c, _, b in rows if c == b)
+    a = sum(1 for rows in all_rows.values() for _, c, ra, _ in rows if c == ra)
+    b = sum(1 for rows in all_rows.values() for _, c, _, rb in rows if c == rb)
+    print(f"Transcripts with role outputs: {len(all_rows)}")
     print(f"Role outputs: {total}")
-    print(f"Exact match, Rule A (own retrievals only):            {match_a} ({match_a * 100 // max(total, 1)}%)")
-    print(f"Exact match, Rule B (own + inherited from previous):  {match_b} ({match_b * 100 // max(total, 1)}%)")
+    print(f"Real documents seen in retrieve results (registry): {sorted(registry)}")
+    print(f"Exact match with Rule A (the proposed spec): {a}/{total} ({pct(a, total)})")
+    print(f"Exact match with Rule B (comparison only):   {b}/{total} ({pct(b, total)})")
 
     reasons = Counter()
     examples = defaultdict(list)
     for name, rows in all_rows.items():
-        for role, cited, _, rule_b in rows:
-            reason = classify(cited, rule_b, known_docs)
+        for role, cited, rule_a, _ in rows:
+            reason = classify(cited, rule_a, registry)
             reasons[reason] += 1
             if reason != "match" and len(examples[reason]) < 2:
-                examples[reason].append(f"{name} [{role}]: agent {cited} | rule B {rule_b}")
-    print("\nAgent output vs Rule B:")
+                examples[reason].append(f"{name} [{role}]: agent {cited} | Rule A {rule_a}")
+    print(f"\nAgent output vs Rule A (categories sum to {sum(reasons.values())}):")
     for reason, count in reasons.most_common():
-        print(f"  {reason}: {count}")
-    print("\nExamples of each difference:")
+        print(f"  {reason}: {count} ({pct(count, total)})")
+    print("\nExamples:")
     for reason, lines in examples.items():
         for line in lines:
             print(f"  ({reason}) {line}")
 
-    print("\nRepeatability on the default development task (same input, several runs):")
+    print("\nRepeatability on the default development task (same input, several runs), Rule A:")
     per_role = defaultdict(list)
     for name in DEFAULT_TASK_RUNS:
-        for role, cited, _, rule_b in all_rows.get(name, []):
-            per_role[role].append((name, tuple(cited) if isinstance(cited, list) else None, tuple(rule_b)))
-    for role, runs in sorted(per_role.items(), key=lambda kv: str(kv[0])):
-        agent_variants = len({c for _, c, _ in runs})
-        rule_variants = len({b for _, _, b in runs})
-        print(f"  {role}: {len(runs)} runs -> agent produced {agent_variants} distinct lists; rule produces {rule_variants}")
+        for role, cited, rule_a, _ in all_rows.get(name, []):
+            per_role[role].append((tuple(cited) if isinstance(cited, list) else None, tuple(rule_a)))
+    for role, runs in sorted(per_role.items()):
+        agent_v = len({c for c, _ in runs})
+        rule_v = len({r for _, r in runs})
+        print(f"  {role}: {len(runs)} runs -> agent wrote {agent_v} distinct list(s); Rule A gives {rule_v}")
     return 0
 
 
