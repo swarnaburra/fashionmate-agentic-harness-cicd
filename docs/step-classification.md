@@ -1,28 +1,118 @@
-# Step Classification
+# Step Classification: FashionMate Agentic Harness
 
-This document is updated after every calibration cycle. Steps that cross the stability threshold are promoted to candidate status. A step that has been a candidate for more than two calibration cycles without meeting all four signals is reviewed for re-scoping.
+Author: swarna. Date: 2026-11-14.
+Source of the step list: `docs/orchestration-diagram.md` (walked from the parent outward), `eval/orchestrator.py`, `.claude/agents/`, and the CI pipeline in `.github/workflows/ci.yml`.
 
-## Step: JSON schema validation
+**Method.** Every step is tested against the four signals: stability, repeatability, specifiability, high run rate. Evidence comes from the Module 3 calibration log (`docs/calibration-log.md`), the Module 4 calibration log, and a read-only analysis of the 31 committed run transcripts in `.eval-artifacts/runs/` (`scripts/analyze_citations.py`, no model calls). Those transcripts were produced by `eval/orchestrator.py` inside the course container during calibration, so the behavior measured is the behavior that would be converted.
 
-- Status: Converted to deterministic (ADR-001, 2026-06-06).
-- Stability: harness scores 14/16, 15/16, 14/16 across the last three calibration runs. Consistent.
-- Repeatability: three runs on the same holdout input produced identical output.
-- Specifiability: validate the output document against `schemas/handoff.json` and reject it if any required field is missing, null, or empty.
-- Run rate: every workflow invocation.
-- Preserved edge case: present-but-empty required fields are rejected by `scripts/validate_handoff_deterministic.py` and covered by `eval/test_deterministic_step.py`.
-- Recommendation: converted.
+**Summary.** 15 steps listed: 9 agentic, 6 already deterministic. **1 strong candidate** (citation list assembly), 2 weak candidates (tester, project manager), 6 not candidates.
+
+| # | Step | Kind today | Recommendation |
+|---|---|---|---|
+| 1 | Orchestrator sequencing (role order, loop/skip/escalate) | Deterministic code in `run_orchestrator` | Already deterministic |
+| 2 | File-path routing to a role | Deterministic (`test_deterministic_router.py`, 5 tests) | Already deterministic |
+| 3 | Scoped handoff construction (`handoff = next_handoff`) | Deterministic (fix d02de14) | Already deterministic |
+| 4 | Handoff / output schema validation | Deterministic (`test_deterministic_step.py`, `output_schema` check) | Already deterministic |
+| 5 | Reviewer-conflict escalation | Deterministic (fix a5e0643) | Already deterministic |
+| 6 | Retrieval similarity floor + keyword fallback | Deterministic (fix ecb7e5f) | Already deterministic |
+| 7 | **Citation list assembly** (each role's `citation_list`) | **Agentic** (prompt line 385) | **Strong candidate** |
+| 8 | Tester (run tests, report pass/fail) | Agentic | Weak candidate |
+| 9 | Project manager (update ticket status) | Agentic | Weak candidate |
+| 10 | Planner | Agentic | Not a candidate |
+| 11 | Implementer | Agentic | Not a candidate |
+| 12 | Reviewer (incl. strict/lenient pair) | Agentic | Not a candidate |
+| 13 | Researcher (optional stretch) | Agentic | Not a candidate |
+| 14 | Advisory code review (CI) | Agentic | Not a candidate |
+| 15 | Rubric judge (agent-as-judge) | Agentic | Not a candidate |
+
+---
+
+## Step: Citation list assembly (each role's `citation_list`)
+
+What it does today: every role is told in `_FINALIZE_INSTRUCTIONS` (eval/orchestrator.py, line 385): *"For roles using retrieve, list the source_document names in citation_list."* The model writes the list itself.
+
+- **Stability:** the task definition has not changed since the Module 3 schema fix (2e31057), and its failure modes are now fully catalogued. The harness's `output_schema` check passed on every development run after 2e31057 (six reruns, 14/14 each, plus REGRESSION-default) and on all 6 measured holdout tasks, across two calibration cycles (2026-11-05 baseline, 2026-11-07 calibration). Note: that check confirms the field *exists*, not that its contents are *correct*; correctness was measured separately below.
+- **Repeatability:** measured on the default development task, the same input run 7 times during calibration (RUN-20261105-020424, -024607, -052236, RUN-20261107-002930, -014242, -060001, REGRESSION-default):
+  - planner (the one role that calls `retrieve`): **1 distinct list in 7 runs**, identical to the rule every time;
+  - implementer: **4 distinct lists in 7 runs**; tester: **5 in 7**; reviewer: **2 in 6**. These roles never call `retrieve`, so the correct list is fixed, yet the agent alternated between `[]`, copying the planner's documents, storage entry IDs, and paraphrased titles;
+  - the deterministic rule produces **1 list per role, every run**.
+  Across all 31 transcripts (122 role outputs), the agent matched the rule exactly in **84 (68%)**. The rest: 32 omitted or added inherited documents inconsistently, 13 had the same documents in a different order, 9 cited storage entry IDs instead of documents, 5 used paraphrased or invented document names (e.g. "Incident Report" for `incident-report-2024-q3.md`), and 4 had no `citation_list` at all.
+  Conclusion: the *correct output* is fully repeatable from the input; the *agent* reproduces it only when there is a real lookup to do. The variation is spec violation, not useful judgment.
+- **Specifiability:** one-paragraph spec, written so a developer could implement it without questions: *For each role's output, `citation_list` is the list of `source_document` values from that role's own `retrieve` tool results in the current run, deduplicated, in order of first appearance. If the role made no `retrieve` calls, it is `[]`. Results withheld by the classification ceiling are never returned by `retrieve`, so they cannot appear. The model no longer writes this field; the orchestrator sets it after the role finishes, overwriting anything the model produced.*
+- **Run rate:** runs on every role output in every orchestrator run: 4 per standard run, 5 on the five-role path, and on every holdout and regression run. Many times per day during development and every CI evaluation.
+- **Known agent judgment / edge-case input the deterministic version must preserve:** a role that did **not** call `retrieve` but built on documents passed down in its handoff (implementer, tester, reviewer). The agent *sometimes* carried the planner's citations forward, which looks like provenance-tracking judgment, but it did so inconsistently (the "own + inherited" rule matched only 48%). The deterministic version must make this explicit rather than lose it silently: `citation_list` = own retrievals only (matching the written spec), and upstream provenance stays available through the scoped handoff chain. A second edge case: a role that read **storage entries** (`read_entry`) and cited their IDs. Storage entries are not documents, so the deterministic version does not list them; this is a deliberate change from the agent's occasional behavior and is recorded in the ADR.
+- **Recommendation: strong candidate.** All four signals are met, the correct output is a lookup over data the orchestrator already holds, and converting it removes one of the six Module 3 failure modes (schema validation) by design instead of by prompt wording.
+
+## Step: Tester (run tests, report pass/fail)
+
+- **Stability:** behavior well understood in the four-role path; passed `required_roles` and `role_order` on every run after 45ccef5.
+- **Repeatability:** not yet measurable for its core output. In the harness the tester does not run a real test suite, so there is no pass/fail result to compare across runs; its citation output varied (5 distinct lists in 7 runs).
+- **Specifiability:** yes in principle: run pytest on the changed files, report exit code and pass/fail counts.
+- **Run rate:** every standard run.
+- **Edge case to preserve:** pytest exit code 5 ("no tests collected"). An agent can report "no tests apply to this change"; a naive script would treat it as a failure or a pass.
+- **Recommendation: weak candidate.** To qualify: give the tester a real test-runner tool in the harness and complete two calibration cycles comparing its reported result to the actual pytest exit code.
+
+## Step: Project manager (update ticket status)
+
+- **Stability:** not established. The only measured run of the five-role path (HO-07) crashed at step 1 because the project manager called `write_entry` without `project_id`.
+- **Repeatability:** not measured (no completed run).
+- **Specifiability:** mostly: map (review verdict, test result, escalation flag) to a status. The wording of the update note may still need judgment.
+- **Run rate:** low; only on the five-role path.
+- **Edge case to preserve:** `escalated_to_human = true` must produce a "needs human review" status, never "done".
+- **Recommendation: weak candidate.** To qualify: fix the HO-07 crash, complete two calibration cycles on the five-role path, and confirm the run rate justifies it.
 
 ## Step: Planner
 
-- Recommendation: not a candidate. Needs judgment and synthesis to break a task into subtasks; output is not specifiable in advance.
-- Next review: 2026-09-04.
+- **Stability:** rubric scores low and variable (part of 38/80 aggregate on holdout).
+- **Repeatability:** plans differ in wording and structure between runs, which is expected for open-ended planning.
+- **Specifiability:** no. Producing an ordered plan from a free-text feature request requires judgment.
+- **Run rate:** every run.
+- **Edge case:** not applicable (not converting).
+- **Recommendation: not a candidate.** Its retrieval-citation sub-task is covered by step 7.
 
-## Step: Release note draft
+## Step: Implementer
 
-- Recommendation: weak candidate. Output is prose that needs human review and is not yet repeatable across runs.
-- Candidate since: 2026-06-04. Next review: 2026-07-04.
+- **Stability / repeatability:** code output varies by design.
+- **Specifiability:** no. Writing code to a plan is judgment work.
+- **Run rate:** every run.
+- **Recommendation: not a candidate.**
 
-## Step: Path-based routing
+## Step: Reviewer (and the strict/lenient pair)
 
-- Recommendation: converted to deterministic sample (ADR-002). It uses explicit path rules with a default for unmatched paths.
-- Preserved edge case: unmatched paths route to `implementer` instead of failing silently.
+- **Stability:** the Module 3 conflict cycle showed verdicts depend heavily on prompt framing.
+- **Specifiability:** no. Judging code quality has contested criteria.
+- **Run rate:** every run.
+- **Recommendation: not a candidate.** (The conflict *resolution* is already deterministic, step 5.)
+
+## Step: Researcher (optional stretch)
+
+- **Specifiability:** no. Open-ended external documentation questions.
+- **Run rate:** rare (only on a research blocker).
+- **Recommendation: not a candidate.**
+
+## Step: Advisory code review (CI)
+
+- **Stability:** measured false-positive rate 29% (PR #1), 38% (PR #4), about 50% (PR #5).
+- **Specifiability:** no. Open-ended review.
+- **Run rate:** every pull request.
+- **Recommendation: not a candidate.** It stays agentic and advisory (see `docs/ci-step-design.md`).
+
+## Step: Rubric judge
+
+- **Specifiability:** no. Scores correctness, adherence, groundedness and clarity.
+- **Stability:** judge-bias risk noted in Module 3 (loads project CLAUDE.md).
+- **Recommendation: not a candidate.**
+
+---
+
+## Already deterministic (listed to keep the picture honest)
+
+Orchestrator sequencing, file-path routing, scoped handoff construction, handoff/output schema validation, reviewer-conflict escalation, and the retrieval similarity floor with keyword fallback are already plain code with deterministic tests. The target state is a mixed workflow: judgment steps stay agentic, rule steps are code, and humans review escalations.
+
+## Reproducing the evidence
+
+```
+python scripts/analyze_citations.py .
+```
+
+Reads only the committed transcripts; prints the match rates, the difference categories, and the repeatability counts above.
