@@ -33,6 +33,7 @@ def _build(tmp_path, files, requires_governed="true", eval_result="success"):
             "--policy-result", "success",
             "--governed-result", "success",
             "--eval-result", eval_result,
+            "--integrity-result", "failure",
             "--review-result", "success",
             "--artifacts", str(artifacts),
             "--out-dir", str(tmp_path),
@@ -52,13 +53,24 @@ def test_trail_has_metadata_policy_and_harness(tmp_path):
             "policy-report.json": _report("passed", "passed"),
             "deterministic-report.json": _report("passed", "failed"),
             "rubric-report.json": _report("passed"),
+            "pipeline-integrity-report.json": {
+                "exitcode": 1,
+                "tests": [
+                    {"nodeid": "pipeline-integrity::classifier_exists", "outcome": "passed"},
+                    {"nodeid": "pipeline-integrity::gates_not_soft", "outcome": "failed",
+                     "detail": "policy-gate has job-level continue-on-error"},
+                ],
+            },
         },
     )
     assert trail["metadata"]["sha"] == "abc1234"
     assert trail["policy"]["passed"] == 2
     assert trail["harness"]["deterministic"]["failed"] == 1
     assert trail["harness"]["rubric"]["present"] is True
+    assert trail["results"]["pipeline_integrity"] == "failure"
+    assert trail["pipeline_integrity"]["failed"] == 1
     assert "Policy checks: 2/2 passed" in summary
+    assert "Pipeline integrity checks: 1/2 passed (failed: gates_not_soft)" in summary
 
 
 def test_authorization_denials_are_collected(tmp_path):

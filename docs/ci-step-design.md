@@ -27,6 +27,7 @@ A job only blocks a merge if it is a required status check in branch protection 
 |---|---|---|
 | Policy Test Suite | yes | failure blocks merge |
 | Governed File Check | yes | failure blocks merge |
+| Pipeline Integrity Check | yes | failure blocks merge; always runs (`if: always()`) and inspects `ci.yml` itself |
 | Evaluation Harness (deterministic) | yes | failure blocks merge; reports success when skipped for non-agent changes |
 | Evaluation Harness (rubric) | no (step inside the required job, with step-level `continue-on-error: true`) | advisory: a rubric failure never fails the job |
 | Advisory Code Review | no | advisory (`continue-on-error: true`) |
@@ -74,9 +75,42 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 - Audit record: this reviewer calls the model directly and makes no MCP calls, so there is no MCP audit log to collect. `review-audit.json` (files reviewed, why each was included or skipped, key present true/false, never the value) is its audit record and is uploaded in the `advisory-review` artifact.
 - Two advisory layers seen in practice: on PR #1 an indentation error made the script exit non-zero; job-level `continue-on-error: true` contained it and nothing was blocked. After the fix, the script exited 0 while reporting high-priority findings.
 
+## Step: Pipeline integrity check
+
+- Does: Reads `.github/workflows/ci.yml` **from the commit under test** (so a PR that weakens the pipeline is judged against its own version of the file) and runs 11 structural checks with `scripts/check_pipeline_integrity.py`. Any failed check fails the job and the run. It inspects the workflow definition itself, not the code change.
+- Checks (each is one entry in the report):
+
+| Check | Looks for | Why |
+|---|---|---|
+| `classifier_exists` | `change-type-check` job exists and still outputs `changed-files`, `requires-governed-check`, `touches-policy` | Every conditional gate reads these; without them gates silently skip |
+| `required_jobs_present` | All seven jobs are still defined | Deleting a gate is the bluntest bypass |
+| `gates_not_soft` | No `continue-on-error` on `policy-gate`, `governed-file-gate`, `eval-gate`, `pipeline-integrity`, at job or step level. Only allowed exception: the `Run rubric harness (advisory)` step | `continue-on-error` turns a gate into an advisory check while it still looks green |
+| `gates_not_conditionally_skipped` | No job-level `if:` on the three gates; `pipeline-integrity` must be exactly `if: always()` | GitHub counts a skipped required job as passing, so `if: false` would disable a gate invisibly |
+| `policy_tests_unconditional` | The `policy-gate` step that runs `eval/test_policy.py` exists and has no `if:` | The policy gate is permanent and must run on every change |
+| `eval_gate_runs_deterministic_harness` | `eval-gate` still runs `eval/test_deterministic.py` | Stops the gate from being hollowed out to an empty job |
+| `policy_gate_runs_first` | `governed-file-gate`, `eval-gate`, `advisory-review`, `pipeline-integrity` all `needs: policy-gate` | Agent steps must not run under unverified permissions |
+| `audit_trail_always` | `audit-trail` has `if: always()` | Without it, a failing run (the one you most need to review) produces no trail |
+| `audit_trail_needs_all` | `audit-trail` `needs:` lists all six other jobs | A job left off the list drops off the record |
+| `no_trigger_path_filters` | No `paths` / `paths-ignore` on the `push` or `pull_request` triggers | A trigger-level filter skips the whole workflow, including required gates |
+| `secrets_step_scoped` | No secret referenced in workflow-level or job-level `env` | Secrets must reach only the step that calls the model |
+
+- Input: the PR's `.github/workflows/ci.yml`. Runs on every push and PR with `needs: [change-type-check, policy-gate]` and `if: always()`, so it runs and reports even when other jobs fail. It needs no container, no model and no secret (Python + PyYAML on the runner, about 30 seconds after the policy gate).
+- Produces: `pipeline-integrity-report.json`, uploaded as the `pipeline-integrity-report` artifact with `if: always()` (90-day retention). Same shape as the pytest JSON reports the other gates emit, so the audit trail reads it the same way:
+  `{"exitcode": 0|1, "workflow": "...", "summary": {"total", "passed", "failed"}, "tests": [{"nodeid": "pipeline-integrity::<check>", "outcome": "passed"|"failed", "detail": "<what was found>"}]}`.
+  If the workflow cannot be parsed, the report has a single failed `workflow_parses` entry. This job always runs, so it is never `not_triggered`; if its report is missing, the audit summary says "not run".
+- Audit trail: `pipeline-integrity` is in `audit-trail`'s `needs:` list, and its result is passed as `--integrity-result`. `build-audit-trail.py` adds a `pipeline_integrity` section (per-check outcome and detail) to `ci-audit-trail-<sha>.json`, plus a **Pipeline Integrity Check** row and a "Pipeline integrity checks: X/11 passed (failed: ...)" line to the PR summary.
+- Classification: **gating, permanent.** Deterministic, and it protects an invariant the team has agreed must always hold: the gates themselves stay intact. Same reasoning as the policy gate; never a candidate for demotion to advisory.
+- Required status check: **Pipeline Integrity Check** is required in the branch protection rule for `main`, alongside Policy Test Suite, Governed File Check and Evaluation Harness.
+- Self-protection: the job's own `continue-on-error`, `if: always()` and its place in `audit-trail` `needs:` are themselves checked. `eval/test_pipeline_integrity.py` runs in this job on every run and proves the checker still catches 8 weakened variants, so the checker cannot quietly stop detecting.
+- Time limit: 5 minutes.
+- Credentials: none.
+- Verified (automated, every run): `test_pipeline_integrity.py` passes the real `ci.yml` (11/11) and fails each weakened copy on the expected check: `continue-on-error` on policy-gate → `gates_not_soft`; `if: always()` removed from audit-trail → `audit_trail_always`; change-type-check deleted → `classifier_exists`; `if: false` on eval-gate → `gates_not_conditionally_skipped`; `continue-on-error` on the deterministic step → `gates_not_soft`; `paths:` on the PR trigger → `no_trigger_path_filters`; secret in job-level env → `secrets_step_scoped`; pipeline-integrity removed from audit-trail needs → `audit_trail_needs_all`.
+- Verified (live PR): PENDING-LIVE-PR
+- Known limit: a PR can also edit `check_pipeline_integrity.py` itself. Changes to `scripts/` trigger the eval gate and the self-test, and the diff is visible in review, but a CODEOWNERS rule requiring a second reviewer on `.github/` and `scripts/` would close this fully. As repository owner I can also bypass branch protection; every bypass is shown in the push output.
+
 ## Step: Audit trail
 
-- Does: Runs after every other job (`needs:` lists all five, `if: always()`), downloads every artifact (`download-artifact@v4` with `merge-multiple: true`), and `scripts/build-audit-trail.py` combines them into one record: CI metadata (SHA, event, PR, timestamp), change classification (including `touches_policy`), every gate result, per-check policy results, per-check deterministic results, rubric results and any recorded scores, and MCP activity with any authorization denials.
+- Does: Runs after every other job (`needs:` lists all six other jobs, including `pipeline-integrity`; `if: always()`), downloads every artifact (`download-artifact@v4` with `merge-multiple: true`), and `scripts/build-audit-trail.py` combines them into one record: CI metadata (SHA, event, PR, timestamp), change classification (including `touches_policy`), every gate result including the pipeline integrity check, per-check policy results, per-check integrity results, per-check deterministic results, rubric results and any recorded scores, and MCP activity with any authorization denials.
 - Input: job results passed as arguments, plus the uploaded reports and any MCP audit logs. In CI the jobs make no MCP calls, so the trail says "No MCP audit logs in this run" instead of showing an unexplained empty list. Denials are collected whenever MCP audit logs are present (covered by `test_audit_trail.py`).
 - Produces: `ci-audit-trail-<sha>.json` and `ci-audit-summary.md` in the `audit-trail` artifact (90-day retention), plus a PR summary comment updated in place by a hidden marker.
 - Honest gate reporting: a conditional gate whose heavy steps were skipped is recorded as `not_triggered`, not `success`.
