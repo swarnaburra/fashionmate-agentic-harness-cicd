@@ -4,7 +4,9 @@ Run an advisory agentic code review on changed files.
 
 This script:
 - Reads CHANGED_FILES from the environment.
-- Reads OPENROUTER_API_KEY from the environment (OpenRouter's Anthropic-compatible endpoint).
+- Reads ADVISORY_REVIEW_API_KEY from the environment: an OpenRouter key used only by
+  this advisory reviewer (OpenRouter's Anthropic-compatible endpoint), separate from the
+  OPENROUTER_API_KEY that the eval-gate rubric step uses.
 - Reviews only text-like changed files.
 - Writes /out/review-output.md.
 - Writes /out/review-audit.json.
@@ -111,11 +113,11 @@ def collect_file_context(paths: list[str]) -> tuple[str, list[dict]]:
 
 
 def call_anthropic(prompt: str) -> str:
-    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    api_key = os.environ.get("ADVISORY_REVIEW_API_KEY", "").strip()
     if not api_key:
         return (
             "## Advisory Code Review\n\n"
-            "No review was performed because `OPENROUTER_API_KEY` was not available. "
+            "No review was performed because `ADVISORY_REVIEW_API_KEY` was not available. "
             "Confirm that the repository secret is configured and injected only into this step.\n"
         )
 
@@ -211,7 +213,7 @@ def main() -> int:
         "mode": "advisory",
         "changed_files": changed_files,
         "files": audit_files,
-        "openrouter_key_present": bool(os.environ.get("OPENROUTER_API_KEY", "").strip()),
+        "advisory_review_key_present": bool(os.environ.get("ADVISORY_REVIEW_API_KEY", "").strip()),
         "output": "/out/review-output.md",
         "exit_behavior": "always_zero_advisory",
     }

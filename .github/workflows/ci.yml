@@ -148,7 +148,11 @@ jobs:
 
       - name: Run advisory agentic review
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Purpose-named credential for the advisory reviewer only. It is a separate
+          # OpenRouter key from the one eval-gate's rubric step uses (OPENROUTER_API_KEY),
+          # so it can be rotated, rate-limited or revoked without touching the evaluation gate.
+          # Enforced by the pipeline-integrity check advisory_credential_isolated.
+          ADVISORY_REVIEW_API_KEY: ${{ secrets.ADVISORY_REVIEW_API_KEY }}
           CHANGED_FILES: ${{ needs.change-type-check.outputs.changed-files }}
         run: |
           mkdir -p ci-out ci-artifacts
@@ -156,7 +160,7 @@ jobs:
             -v "$GITHUB_WORKSPACE":/workspace:ro \
             -v "$GITHUB_WORKSPACE/ci-out":/out \
             -w /workspace \
-            -e OPENROUTER_API_KEY \
+            -e ADVISORY_REVIEW_API_KEY \
             -e CHANGED_FILES \
             agentic_engineer_4 \
             python scripts/run-reviewer.py

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -35,6 +36,10 @@ EXPECTED_JOBS = [
 ALLOWED_SOFT_STEPS = {("eval-gate", "Run rubric harness (advisory)")}
 CLASSIFIER_OUTPUTS = {"changed-files", "requires-governed-check", "touches-policy"}
 MUST_NEED_POLICY_GATE = ["governed-file-gate", "eval-gate", "advisory-review", "pipeline-integrity"]
+# The advisory reviewer's own, purpose-named credential. No other job may use it, and
+# the reviewer may use no other secret (GITHUB_TOKEN excepted), so the two model-calling
+# steps never share a key.
+ADVISORY_SECRET = "ADVISORY_REVIEW_API_KEY"
 
 
 def _is_set(value) -> bool:
@@ -159,6 +164,23 @@ def run_checks(workflow: dict) -> list[tuple[str, bool, str]]:
         if "secrets." in json.dumps((job or {}).get("env") or {}):
             problems.append(f"{name} has a job-level env that references a secret")
     record("secrets_step_scoped", problems, "secrets appear only in step-level env")
+
+    # 12. The advisory reviewer has its own purpose-named credential, shared with no other job.
+    problems = []
+    advisory_text = json.dumps(jobs.get("advisory-review") or {})
+    if f"secrets.{ADVISORY_SECRET}" not in advisory_text:
+        problems.append(f"advisory-review does not use secrets.{ADVISORY_SECRET}")
+    extra = sorted(set(re.findall(r"secrets\.([A-Za-z0-9_]+)", advisory_text)) - {ADVISORY_SECRET, "GITHUB_TOKEN"})
+    if extra:
+        problems.append(f"advisory-review also references secret(s): {', '.join(extra)}")
+    for name, job in jobs.items():
+        if name != "advisory-review" and f"secrets.{ADVISORY_SECRET}" in json.dumps(job or {}):
+            problems.append(f"{name} uses the advisory-review credential secrets.{ADVISORY_SECRET}")
+    record(
+        "advisory_credential_isolated",
+        problems,
+        f"advisory-review uses its own {ADVISORY_SECRET}, shared with no other job",
+    )
 
     return results
 
