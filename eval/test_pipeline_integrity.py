@@ -60,7 +60,22 @@ def _add_trigger_paths(wf):
 
 
 def _job_level_secret(wf):
-    wf["jobs"]["advisory-review"]["env"] = {"OPENROUTER_API_KEY": "${{ secrets.OPENROUTER_API_KEY }}"}
+    wf["jobs"]["advisory-review"]["env"] = {"ADVISORY_REVIEW_API_KEY": "${{ secrets.ADVISORY_REVIEW_API_KEY }}"}
+
+
+def _step(wf, job, name):
+    return next(s for s in wf["jobs"][job]["steps"] if s.get("name") == name)
+
+
+def _advisory_back_on_shared_key(wf):
+    env = _step(wf, "advisory-review", "Run advisory agentic review")["env"]
+    env.pop("ADVISORY_REVIEW_API_KEY", None)
+    env["OPENROUTER_API_KEY"] = "${{ secrets.OPENROUTER_API_KEY }}"
+
+
+def _eval_gate_borrows_advisory_key(wf):
+    env = _step(wf, "eval-gate", "Run rubric harness (advisory)").setdefault("env", {})
+    env["ADVISORY_REVIEW_API_KEY"] = "${{ secrets.ADVISORY_REVIEW_API_KEY }}"
 
 
 def _unwire_integrity_from_audit(wf):
@@ -79,6 +94,8 @@ def _unwire_integrity_from_audit(wf):
         (_soften_deterministic_step, "gates_not_soft"),
         (_add_trigger_paths, "no_trigger_path_filters"),
         (_job_level_secret, "secrets_step_scoped"),
+        (_advisory_back_on_shared_key, "advisory_credential_isolated"),
+        (_eval_gate_borrows_advisory_key, "advisory_credential_isolated"),
         (_unwire_integrity_from_audit, "audit_trail_needs_all"),
     ],
 )

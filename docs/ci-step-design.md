@@ -17,7 +17,16 @@ Rule used for every classification: deterministic checks may gate immediately; e
 
 Gaps found (resolved 2026-11-11): no evaluation-harness job existed, so agent-affecting changes were never re-checked; added as `eval-gate`. The review step read `ANTHROPIC_API_KEY`; migrated to `OPENROUTER_API_KEY` via OpenRouter's Anthropic-compatible endpoint.
 
-MCP server credentials: none required. The coursetools, retrieval and storage FastMCP servers read only non-secret configuration from the environment: file paths (COURSETOOLS_ROOT, COURSETOOLS_ALLOWLIST, *_AUDIT_LOG, STORAGE_STORE) and the role label AGENT_ROLE. None are credentials, so none are registered as secrets (checked 2026-11-10). Only OPENROUTER_API_KEY is registered.
+MCP server credentials: none required. The coursetools, retrieval and storage FastMCP servers read only non-secret configuration from the environment: file paths (COURSETOOLS_ROOT, COURSETOOLS_ALLOWLIST, *_AUDIT_LOG, STORAGE_STORE) and the role label AGENT_ROLE. None are credentials, so none are registered as secrets (checked 2026-11-10).
+
+Repository secrets (updated 2026-11-17): two, one per model-calling step, never shared.
+
+| Secret | Used by (only) | Why separate |
+|---|---|---|
+| `ADVISORY_REVIEW_API_KEY` | `advisory-review` job, step "Run advisory agentic review" | Purpose-named key for the advisory reviewer. It runs on every PR and posts to the PR, so it can be rotated, given its own spending limit, or revoked without touching the evaluation gate. |
+| `OPENROUTER_API_KEY` | `eval-gate` job, step "Run rubric harness (advisory)" | Used by the rubric judge and `eval/orchestrator.py`. Revoking or exhausting it cannot silence the code review, and the review key cannot be used to run evaluations. |
+
+Both are separate OpenRouter keys, injected into one step each through step-level `env`. Enforced by two pipeline-integrity checks: `secrets_step_scoped` (no secret in workflow- or job-level env) and `advisory_credential_isolated` (advisory-review uses `ADVISORY_REVIEW_API_KEY` and no other secret; no other job uses it). Change made after grading feedback that the advisory reviewer shared `OPENROUTER_API_KEY` with eval-gate.
 
 ## Where gating is enforced
 
@@ -61,7 +70,7 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 - Produces: `rubric-report.json` artifact with each score and the judge's justification.
 - Classification: **advisory.** The rubric scored 38/80 on the holdout set with 1/6 tasks passing both layers, and the judge loads project context that may bias it, so it is not yet calibrated enough to block a merge. Promote to gating once holdout scores are stable at or above the 12/16 threshold over repeated runs.
 - Time limit: 15 minutes.
-- Credentials: `OPENROUTER_API_KEY`, injected from repository secrets into this step only.
+- Credentials: `OPENROUTER_API_KEY`, injected from repository secrets into this step only. Not shared with the advisory reviewer, which has its own `ADVISORY_REVIEW_API_KEY` (integrity check `advisory_credential_isolated`).
 
 ## Step: Automated code review
 
@@ -70,14 +79,14 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 - Produces: a PR comment, `review-output.md`, and `review-audit.json`. The comment is created or updated by a hidden marker (`scripts/upsert_pr_comment.py`), so reruns update one comment and the review and audit summary never overwrite each other.
 - Classification: **advisory** (`continue-on-error: true`; not a required status check). Its output needs human judgment. First measured false-positive rate: 2 of 7 findings (29%) on PR #1, see `docs/calibration-log.md`. Promote to gating only after a human reviewer has labelled its findings on at least 20 PRs and fewer than 10% are false alarms. Results are tracked in `docs/calibration-log.md`.
 - Time limit: 15 minutes.
-- Credentials: `OPENROUTER_API_KEY`, scoped to the reviewer step only. Migrated from `ANTHROPIC_API_KEY` to OpenRouter's Anthropic-compatible endpoint on 2026-11-11; verified by a real review on PR #1.
+- Credentials: `ADVISORY_REVIEW_API_KEY`, a purpose-named OpenRouter key used by this step and nothing else, injected through the step's own `env` and passed into the container with `-e ADVISORY_REVIEW_API_KEY`. History: migrated from `ANTHROPIC_API_KEY` to `OPENROUTER_API_KEY` on 2026-11-11 (verified by a real review on PR #1); separated from eval-gate's `OPENROUTER_API_KEY` on 2026-11-17 so the two model-calling steps no longer share a credential. `scripts/run-reviewer.py` reads only `ADVISORY_REVIEW_API_KEY`, and `review-audit.json` records `advisory_review_key_present` (true/false, never the value).
 - Permissions: job-level `contents: read` and `pull-requests: write` only, so the automatic token can post the review comment and nothing else.
 - Audit record: this reviewer calls the model directly and makes no MCP calls, so there is no MCP audit log to collect. `review-audit.json` (files reviewed, why each was included or skipped, key present true/false, never the value) is its audit record and is uploaded in the `advisory-review` artifact.
 - Two advisory layers seen in practice: on PR #1 an indentation error made the script exit non-zero; job-level `continue-on-error: true` contained it and nothing was blocked. After the fix, the script exited 0 while reporting high-priority findings.
 
 ## Step: Pipeline integrity check
 
-- Does: Reads `.github/workflows/ci.yml` **from the commit under test** (so a PR that weakens the pipeline is judged against its own version of the file) and runs 11 structural checks with `scripts/check_pipeline_integrity.py`. Any failed check fails the job and the run. It inspects the workflow definition itself, not the code change.
+- Does: Reads `.github/workflows/ci.yml` **from the commit under test** (so a PR that weakens the pipeline is judged against its own version of the file) and runs 12 structural checks with `scripts/check_pipeline_integrity.py`. Any failed check fails the job and the run. It inspects the workflow definition itself, not the code change.
 - Checks (each is one entry in the report):
 
 | Check | Looks for | Why |
@@ -93,18 +102,19 @@ Change Classifier is the only job that does not need policy-gate: it runs first 
 | `audit_trail_needs_all` | `audit-trail` `needs:` lists all six other jobs | A job left off the list drops off the record |
 | `no_trigger_path_filters` | No `paths` / `paths-ignore` on the `push` or `pull_request` triggers | A trigger-level filter skips the whole workflow, including required gates |
 | `secrets_step_scoped` | No secret referenced in workflow-level or job-level `env` | Secrets must reach only the step that calls the model |
+| `advisory_credential_isolated` | `advisory-review` uses `secrets.ADVISORY_REVIEW_API_KEY` and no other secret (`GITHUB_TOKEN` excepted); no other job references `ADVISORY_REVIEW_API_KEY` | The advisory reviewer must not share a credential with eval-gate; a shared key means revoking or rate-limiting one silently breaks the other, and a leak in one step exposes both |
 
 - Input: the PR's `.github/workflows/ci.yml`. Runs on every push and PR with `needs: [change-type-check, policy-gate]` and `if: always()`, so it runs and reports even when other jobs fail. It needs no container, no model and no secret (Python + PyYAML on the runner, about 30 seconds after the policy gate).
 - Produces: `pipeline-integrity-report.json`, uploaded as the `pipeline-integrity-report` artifact with `if: always()` (90-day retention). Same shape as the pytest JSON reports the other gates emit, so the audit trail reads it the same way:
   `{"exitcode": 0|1, "workflow": "...", "summary": {"total", "passed", "failed"}, "tests": [{"nodeid": "pipeline-integrity::<check>", "outcome": "passed"|"failed", "detail": "<what was found>"}]}`.
   If the workflow cannot be parsed, the report has a single failed `workflow_parses` entry. This job always runs, so it is never `not_triggered`; if its report is missing, the audit summary says "not run".
-- Audit trail: `pipeline-integrity` is in `audit-trail`'s `needs:` list, and its result is passed as `--integrity-result`. `build-audit-trail.py` adds a `pipeline_integrity` section (per-check outcome and detail) to `ci-audit-trail-<sha>.json`, plus a **Pipeline Integrity Check** row and a "Pipeline integrity checks: X/11 passed (failed: ...)" line to the PR summary.
+- Audit trail: `pipeline-integrity` is in `audit-trail`'s `needs:` list, and its result is passed as `--integrity-result`. `build-audit-trail.py` adds a `pipeline_integrity` section (per-check outcome and detail) to `ci-audit-trail-<sha>.json`, plus a **Pipeline Integrity Check** row and a "Pipeline integrity checks: X/12 passed (failed: ...)" line to the PR summary.
 - Classification: **gating, permanent.** Deterministic, and it protects an invariant the team has agreed must always hold: the gates themselves stay intact. Same reasoning as the policy gate; never a candidate for demotion to advisory.
 - Required status check: **Pipeline Integrity Check** is required in the branch protection rule for `main`, alongside Policy Test Suite, Governed File Check and Evaluation Harness.
-- Self-protection: the job's own `continue-on-error`, `if: always()` and its place in `audit-trail` `needs:` are themselves checked. `eval/test_pipeline_integrity.py` runs in this job on every run and proves the checker still catches 8 weakened variants, so the checker cannot quietly stop detecting.
+- Self-protection: the job's own `continue-on-error`, `if: always()` and its place in `audit-trail` `needs:` are themselves checked. `eval/test_pipeline_integrity.py` runs in this job on every run and proves the checker still catches 10 weakened variants, so the checker cannot quietly stop detecting.
 - Time limit: 5 minutes.
 - Credentials: none.
-- Verified (automated, every run): `test_pipeline_integrity.py` passes the real `ci.yml` (11/11) and fails each weakened copy on the expected check: `continue-on-error` on policy-gate → `gates_not_soft`; `if: always()` removed from audit-trail → `audit_trail_always`; change-type-check deleted → `classifier_exists`; `if: false` on eval-gate → `gates_not_conditionally_skipped`; `continue-on-error` on the deterministic step → `gates_not_soft`; `paths:` on the PR trigger → `no_trigger_path_filters`; secret in job-level env → `secrets_step_scoped`; pipeline-integrity removed from audit-trail needs → `audit_trail_needs_all`.
+- Verified (automated, every run): `test_pipeline_integrity.py` passes the real `ci.yml` (12/12 since 2026-11-17; 11/11 before the credential check was added) and fails each weakened copy on the expected check: `continue-on-error` on policy-gate → `gates_not_soft`; `if: always()` removed from audit-trail → `audit_trail_always`; change-type-check deleted → `classifier_exists`; `if: false` on eval-gate → `gates_not_conditionally_skipped`; `continue-on-error` on the deterministic step → `gates_not_soft`; `paths:` on the PR trigger → `no_trigger_path_filters`; secret in job-level env → `secrets_step_scoped`; advisory reviewer switched back to the shared `OPENROUTER_API_KEY` → `advisory_credential_isolated`; eval-gate's rubric step given `ADVISORY_REVIEW_API_KEY` → `advisory_credential_isolated`; pipeline-integrity removed from audit-trail needs → `audit_trail_needs_all`.
 - Verified (live PR): PR #8 (`test/weaken-policy-gate`, commit cd1f986, run #38) added `continue-on-error: true` to `policy-gate`. Result: **Pipeline Integrity Check failed after 7 seconds** with `FAIL gates_not_soft: policy-gate has job-level continue-on-error` (10/11 checks passed), and as a required check it **blocked the merge**. The Policy Test Suite caught it independently (`test_policy_gate_is_not_continue_on_error` failed, 39/40 passed), a second layer. The audit trail for that run recorded `| Pipeline Integrity Check | failure |` and `Pipeline integrity checks: 10/11 passed (failed: gates_not_soft)` in `ci-audit-summary.md` (commit aac383d), so the failure is in the durable record, not only the PR checks UI. Real finding from this run: because of the weakening, `needs.policy-gate.result` was reported as `success` even though a policy test failed, so the audit gate table showed "Policy Test Suite | success" while the per-check line showed 39/40. The weakening disguised the policy failure; only the per-check count and the integrity check exposed it. The weakening also let downstream jobs start despite the failed policy gate. Reverting on the same PR (commit 2c24874) returned every check to green, and PR #8 was then merged (not closed, by mistake). Because it contained both the weakening and its revert, the net change to ci.yml is zero (confirmed with git diff against 750c84b), and the merge was only possible after the revert turned every required check green.
 - Known limit: a PR can also edit `check_pipeline_integrity.py` itself. Changes to `scripts/` trigger the eval gate and the self-test, and the diff is visible in review, but a CODEOWNERS rule requiring a second reviewer on `.github/` and `scripts/` would close this fully. As repository owner I can also bypass branch protection; every bypass is shown in the push output.
 
