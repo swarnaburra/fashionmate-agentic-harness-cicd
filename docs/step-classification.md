@@ -69,13 +69,47 @@ What it does today: every role is told in `_FINALIZE_INSTRUCTIONS` (eval/orchest
 
 ## Step: Project manager (update ticket status)
 
-- **Stability:** not established. The only measured run of the five-role path (HO-07) crashed at step 1 because the project manager called `write_entry` without `project_id`.
-- **Repeatability:** not measured (no completed run).
-- **Specifiability:** mostly: map (review verdict, test result, escalation flag) to a status. The wording of the update note may still need judgment.
-- **Run rate:** low; only on the five-role path.
-- **Edge case to preserve:** `escalated_to_human = true` must produce a "needs human review" status, never "done".
-- **Recommendation: weak candidate.** To qualify: fix the HO-07 crash, complete two calibration cycles on the five-role path, and confirm the run rate justifies it.
+**Readiness review: 2026-11-15 (Module 4 exercise).** Conversion-readiness package for this step: the classification below, the proposed decision in `docs/adr/ADR-004-project-manager-ticket-status-deterministic-conversion.md` (Status: Proposed), and the test, measurement and rollback plan at the end of this section. Nothing has been built or measured for a replacement.
+
+**What it does.** The project manager is the terminal role of the full workflow (`.claude/agents/project-manager.md`, v1.1.0). It receives the parent orchestrator's assembled run summary (ticket ID, what was implemented, review outcome, test outcome, and any status the parent wants recorded), chooses the ticket status (`Done`, `Needs Work`, `Blocked`, or a status the parent specifies), updates the ticket with `mcp__coursetools__task_tracker` and adds a short note, then returns a fixed-format confirmation to the parent. Governance requires a human checkpoint before the ticket update (`docs/governance-policy.md`, orchestrator autonomy conditions); that checkpoint sits outside this step and stays whichever way the step is implemented.
+
+| Signal | Score | Evidence |
+|---|---|---|
+| Stability | Fail | The task definition itself is not settled. The agent file describes the project manager as the *last* role, which updates a ticket; the eval harness defines it as the *first* role, which must "create a project entry in the store" (`eval/orchestrator.py`, `_ROLE_DESCRIPTIONS["project_manager"]`), while governance denies it `write_entry` (`docs/governance-policy.md`, role project-manager). The agent file itself changed between runs (v1.0.0 to v1.1.0, after Iteration Log Misfire 1). The only harness run of the five-role path, HO-07, crashed at step 1 because the project manager called `write_entry` without `project_id` (`docs/calibration-log.md`, "Remaining gaps"). |
+| Repeatability | Not measured (fail) | There are no same-input repetitions. The step has completed end to end exactly once (`docs/iteration-log.md`, Run 1, 2026-11-03: ticket CSV-EXPORT-1 set to `Done` after human confirmation), plus one project-manager-only rerun (`docs/iteration-log.md`, Rerun 2026-11-04). None of the 38 committed JSON artifacts under `.eval-artifacts/` contains a project-manager event, so no replay over past runs is possible. |
+| Specifiability | Pass for the status decision; partial for the note | The status guidance in the agent file is already a decision table: implemented, review passed and all tests passed gives `Done`; review or tests failed gives `Needs Work`, `Blocked` or the parent's status; an ambiguous summary gives no update and an open question; a tracker error is reported exactly. Only the free-text note needs wording, and a template ("review passed, tests 12/12") would satisfy the agent's required output format. |
+| Run rate | Low (fail) | Once per run, and only on the five-role path. No development or holdout task measured in the two calibration cycles includes the project manager except HO-07, which crashed; the step has run once in a live session (Iteration Log Run 1). |
+
+**Known agent judgment / edge-case input:** an incomplete or ambiguous run summary, above all a summary with **no ticket identifier**. In Iteration Log Run 1 (2026-11-03, Misfire 1) the project manager received no ticket ID; it did not invent one or update another ticket, it stopped, and the human supplied `CSV-EXPORT-1` mid-run. The same judgment covers the related cases the agent file names ("If the parent's summary is ambiguous, do not guess"): a test outcome that is only an aggregate PASS with no per-test detail (Iteration Log Misfire 6), and a run escalated to a human after a reviewer conflict (fix a5e0643), which must never be recorded as `Done`. A deterministic version must return "no update, open question" for these inputs every time instead of mapping them to the nearest status.
+
+**Recommendation: weak candidate.** The status decision is specifiable, close to a lookup table, so the step is a plausible future conversion. It fails stability, repeatability and run rate: its definition differs between the agent file and the harness, it has completed only once, and it runs on a path that two calibration cycles never measured. Converting now would mean encoding a decision table that has never been compared with what the agent actually does, for a step that almost never runs, so the expected savings are small and the evidence is missing. It stays agentic until the harness definition matches the agent file, the HO-07 crash is fixed, and the five-role path has run for two calibration cycles.
 - **Candidate since:** 2026-11-14. **Next review:** 2026-12-15 (near: re-check after the HO-07 crash is fixed and the five-role path completes two calibration cycles).
+
+### Conversion plan (for use only if the step reaches strong-candidate status)
+
+Proposed replacement (ADR-004): `scripts/ticket_status.py` with a pure function `decide_ticket_update(summary)` that returns either `{"action": "update", "ticket", "status", "note"}` or `{"action": "ask", "question"}`. The orchestrator would call it where it now invokes the project-manager agent, keep the human checkpoint before the update, and make the `task_tracker` call itself.
+
+**Test plan** (`eval/test_ticket_status.py`, no model calls):
+
+| # | Test | Input | Expected output | Why it matters |
+|---|---|---|---|---|
+| 1 | Normal success | Ticket `CSV-EXPORT-1`, implemented, review passed, tests 12/12 with per-test results | `update`, status `Done`, note "review passed, tests 12/12" | Reproduces the one completed live run (Iteration Log Run 1). |
+| 2 | Failure case | Same ticket, review passed, tests 10/12 with two named failures | `update`, status `Needs Work`, note names both failing tests; never `Done` | A failing run must never close a ticket. |
+| 3 | Tracker error | Valid input; the tracker returns an error | No retry; the error is reported to the parent exactly; `Update performed: no` | Agent file rule: report the error exactly and do not attempt unrelated workarounds. |
+| 4 | **Named edge case: missing ticket ID** | Review passed, tests 12/12, `ticket` absent, empty, or whitespace-only | `ask` with "No ticket identifier in the run summary"; **no tracker call** | Iteration Log Misfire 1. A script that defaulted or guessed would update the wrong ticket, or none, on every such run, silently. |
+| 5 | Edge case: aggregate-only test result | Ticket present, review passed, test outcome "PASS" with no per-test counts | `ask`, no update | Iteration Log Misfire 6; the agent file says an ambiguous summary must not be guessed. |
+| 6 | Edge case: escalated run | Tests 12/12, review passed, `escalated_to_human: true` | Never `Done`; `Blocked` with note "escalated to human" | The reviewer-conflict escalation (a5e0643) must carry through to the ticket. |
+| 7 | Parent-specified status | Parent requests a status outside the allowed set (for example `On Hold`) | `ask`; a requested status inside the set is used as given | Prevents an unknown status being written to the tracker. |
+
+**Measurement plan.** A baseline must be collected first, because none exists. After the harness project manager is made to match the agent file and HO-07 is fixed, run the five-role path for two calibration cycles (HO-07 plus one five-role development task, 3 runs each on the same input) and record, for every project-manager invocation, the status chosen, whether it asked a question, latency and tokens. Then run the same inputs through the script.
+- **Latency:** project-manager invocation time versus script time.
+- **Token cost:** agent tokens per invocation versus 0. Prerequisite: fix the bug where `token_count` is never added to `total_tokens` (`docs/calibration-log.md`: "Cost check is vacuous"); otherwise both sides read 0 and the comparison means nothing.
+- **Predictability:** distinct statuses across 3 same-input runs (agent) versus 1 (script), and the agreement rate between the agent's choice and the decision table on every recorded summary. Every disagreement is reviewed one by one before acceptance, because each is either an agent error or a rule the table is missing.
+- **Audit clarity:** the tracker audit entry records which rule fired (for example `rule: tests_failed`) instead of a free-text rationale.
+- **Quality and harness:** HO-07 assertions (all five roles in order, budgets), `required_roles`, `role_order`, policy suite 40/40, deterministic gate unchanged; end to end on HO-07 plus two development tasks with 0 regressions.
+- **Rubric:** clarity and groundedness of the project manager's note become not applicable for a templated note and are marked N/A, not scored 0, so a lower rubric total is not misread as a regression. Correctness and task_adherence still apply.
+
+**Rollback note.** The conversion would land as one focused commit, in its own PR with nothing unrelated in it, containing: `scripts/ticket_status.py` and `eval/test_ticket_status.py`; the orchestrator change that calls the function instead of the project-manager agent (role description and invocation); the project-manager row in `docs/routing-and-tool-grant-map.md` and `.json` changed to a deterministic step holding only `task_tracker`; the project-manager role entry in `docs/governance-policy.md` plus a line under "Deterministic conversion history"; `.claude/agents/project-manager.md` marked retired (moved, not deleted); the role list in `eval/test_policy.py`, which asserts that project-manager exists; and the CI deterministic-gate step adding the new test file. If the replacement failed after integration, `git revert <that commit>` restores the agent definition, its prompt, the map row, the policy entry, the policy test and the CI line together. The human checkpoint before the ticket update is unchanged in both directions, so a rollback never removes a safeguard.
 
 ## Step: Planner
 
